@@ -1,0 +1,506 @@
+import React, { useState, useMemo } from "react";
+import {
+  Users,
+  Calendar,
+  Clock,
+  DollarSign,
+  AlertCircle,
+  Star,
+  BarChart3,
+  Target,
+  Activity,
+  FileText,
+  ShoppingBag,
+  Settings,
+  Plus,
+  Trash2,
+  Zap,
+  FilePlus,
+  Package
+} from "lucide-react";
+
+// HotSushiManagement.jsx
+// Sistema completo de gestão (front-end demo) com controle de estoque, fornecedores,
+// fichas técnicas, consumo automático por pedido e integrações (Yooga).
+// Observações de integração com Yooga abaixo (documentadas no painel de Configurações).
+
+export default function HotSushiManagement() {
+  const [activeTab, setActiveTab] = useState("dashboard");
+
+  /* ======= DADOS PRINCIPAIS (ESTADO) ======= */
+  // Equipe
+  const [team, setTeam] = useState([
+    { id: 1, name: "Hiago", role: "Gerente", shift: "Integral", performance: 98 },
+    { id: 2, name: "Ian", role: "Sushiman", shift: "Noite", performance: 95 }
+  ]);
+
+  // Pedidos (vêm do Yooga ou simulação)
+  const [pedidos, setPedidos] = useState([
+    { id: "#4521", channel: "Yooga", cliente: "João Silva", items: [{ sku: "SUS-02", qty: 2 }], status: "Preparando", responsavel: "Ian", tempo: 18, valor: 132 }
+  ]);
+
+  // Estoque: cada item com custo, unidade, estoque atual, estoque mínimo, fornecedor
+  const [stock, setStock] = useState([
+    { id: 'ING-001', sku: 'SAL-01', name: 'Salmão (kg)', unit: 'kg', qty: 25, cost: 50.0, minStock: 20, supplierId: 'F1' },
+    { id: 'ING-002', sku: 'ARZ-01', name: 'Arroz (kg)', unit: 'kg', qty: 12, cost: 6.0, minStock: 10, supplierId: 'F2' },
+    { id: 'ING-003', sku: 'NORI-01', name: 'Nori (un)', unit: 'un', qty: 200, cost: 0.8, minStock: 50, supplierId: 'F3' }
+  ]);
+
+  // Fornecedores
+  const [suppliers, setSuppliers] = useState([
+    { id: 'F1', name: 'Peixes do Porto', contact: 'contato@peixes.com', leadDays: 2 },
+    { id: 'F2', name: 'Arroz Bom', contact: 'vendas@arroz.com', leadDays: 3 },
+    { id: 'F3', name: 'Alga Master', contact: 'comercial@nori.com', leadDays: 5 }
+  ]);
+
+  // Ficha técnica / Receitas - mapeia item do cardápio para ingredientes (sku + quantidade)
+  const [recipes, setRecipes] = useState([
+    { sku: 'SUS-02', name: 'Sushi Salmão (un)', ingredients: [{ sku: 'SAL-01', qty: 0.12, unit: 'kg' }, { sku: 'ARZ-01', qty: 0.08, unit: 'kg' }, { sku: 'NORI-01', qty: 1, unit: 'un' }], price: 66 }
+  ]);
+
+  // Pedidos de compra (PO) e histórico de movimentação
+  const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [movements, setMovements] = useState([]); // {type: 'saida'|'entrada'|'ajuste'|'perda', sku, qty, note, date}
+
+  // Configurações adicionais
+  const [settings, setSettings] = useState({
+    tempoMaximo: 15,
+    integracaoYooga: false,
+    yoogaApiKey: '',
+    autoReorder: true,
+    reorderMultiplier: 1.5 // quando abaixo do minStock, pedir minStock * multiplier
+  });
+
+  /* ======= HELPERS E CÁLCULOS (useMemo) ======= */
+  const stockValue = useMemo(() => stock.reduce((s, i) => s + (i.qty * i.cost), 0), [stock]);
+  const lowStock = useMemo(() => stock.filter(i => i.qty <= i.minStock), [stock]);
+
+  /* ======= FUNÇÕES DE GESTÃO ======= */
+  // Adicionar/Remover itens de estoque
+  function addStockItem(item) {
+    setStock(prev => [...prev, { ...item, id: item.id || `ING-${Date.now()}` }]);
+    logMovement({ type: 'entrada', sku: item.sku, qty: item.qty, note: 'Cadastro inicial' });
+  }
+
+  function removeStockItem(sku) {
+    setStock(prev => prev.filter(i => i.sku !== sku));
+    setMovements(prev => [...prev, { type: 'ajuste', sku, qty: 0, note: 'Removido do catálogo', date: new Date() }]);
+  }
+
+  // Ajuste manual de estoque (contagem física ou correção)
+  function adjustStock(sku, newQty, reason = 'Ajuste manual') {
+    setStock(prev => prev.map(i => i.sku === sku ? { ...i, qty: newQty } : i));
+    logMovement({ type: 'ajuste', sku, qty: newQty, note: reason });
+  }
+
+  // Registrar movimentação no histórico
+  function logMovement({ type, sku, qty, note }) {
+    setMovements(prev => [{ type, sku, qty, note, date: new Date() }, ...prev]);
+  }
+
+  // Criar pedido de compra automático para fornecedores (PO)
+  function createPurchaseOrdersForLowStock() {
+    const orders = lowStock.map(item => {
+      const supplier = suppliers.find(s => s.id === item.supplierId) || { id: 'UNK' };
+      const orderQty = Math.max(Math.ceil(item.minStock * settings.reorderMultiplier - item.qty), 1);
+      return {
+        id: `PO-${Date.now()}-${item.sku}`,
+        supplierId: supplier.id,
+        supplierName: supplier.name,
+        sku: item.sku,
+        qty: orderQty,
+        etaDays: supplier.leadDays,
+        status: 'open',
+        createdAt: new Date()
+      };
+    });
+
+    setPurchaseOrders(prev => [...orders, ...prev]);
+    return orders;
+  }
+
+  // Receber PO (quando fornecedor entrega)
+  function receivePurchaseOrder(poId) {
+    const po = purchaseOrders.find(p => p.id === poId);
+    if (!po) return;
+    setStock(prev => prev.map(i => i.sku === po.sku ? { ...i, qty: Number(i.qty) + Number(po.qty) } : i));
+    setPurchaseOrders(prev => prev.map(p => p.id === poId ? { ...p, status: 'received', receivedAt: new Date() } : p));
+    logMovement({ type: 'entrada', sku: po.sku, qty: po.qty, note: `Recebido PO ${poId}` });
+  }
+
+  // Registrar perda/desperdício
+  function recordWaste(sku, qty, reason) {
+    setStock(prev => prev.map(i => i.sku === sku ? { ...i, qty: Number(i.qty) - Number(qty) } : i));
+    logMovement({ type: 'perda', sku, qty: -Math.abs(qty), note: reason });
+  }
+
+  // Consome ingredientes ao confirmar pedido (chamado quando pedido é recebido/aceito)
+  function consumeIngredientsFromOrder(order) {
+    // order.items: [{ sku, qty }], sku refere-se ao SKU do menu (ex: SUS-02)
+    let toConsume = [];
+    order.items.forEach(orderItem => {
+      const recipe = recipes.find(r => r.sku === orderItem.sku);
+      if (!recipe) return; // sem ficha técnica
+      recipe.ingredients.forEach(ing => {
+        toConsume.push({ sku: ing.sku, qty: ing.qty * orderItem.qty });
+      });
+    });
+
+    // Deduzir do estoque
+    setStock(prev => prev.map(item => {
+      const c = toConsume.filter(t => t.sku === item.sku).reduce((s, x) => s + x.qty, 0);
+      if (c > 0) {
+        logMovement({ type: 'saida', sku: item.sku, qty: -c, note: `Consumo por pedido ${order.id}` });
+        return { ...item, qty: Math.max(0, Number(item.qty) - c) };
+      }
+      return item;
+    }));
+  }
+
+  // Marcar pedido como pronto e consumir estoque
+  function acceptPedido(pedidoId) {
+    setPedidos(prev => prev.map(p => p.id === pedidoId ? { ...p, status: 'Em produção' } : p));
+  }
+
+  function finalizarPedido(pedidoId) {
+    const order = pedidos.find(p => p.id === pedidoId);
+    if (!order) return;
+    consumeIngredientsFromOrder(order);
+    setPedidos(prev => prev.map(p => p.id === pedidoId ? { ...p, status: 'Pronto' } : p));
+  }
+
+  // Integração Yooga (front-end demonstração: troca modo simulação por fetch real)
+  async function fetchPedidosFromYooga() {
+    // Nota: ideal é receber via Webhook no seu backend. Se não for possível, Yooga provavelmente dispõe
+    // de endpoints ou integrações que permitem disponibilizar pedidos no painel do parceiro.
+    // Abaixo: exemplo de polling -- substitua /api/yooga/pedidos pelo seu backend.
+    try {
+      // Simulação: adiciona um pedido mockado
+      const id = `#YOOGA-${Math.floor(Math.random()*9999)}`; 
+      const newP = { id, channel: 'Yooga', cliente: 'Cliente Yooga', items: [{ sku: 'SUS-02', qty: 1 }], status: 'Novo', responsavel: 'Cozinha', tempo: 0, valor: 66 }; 
+      setPedidos(prev => [newP, ...prev]);
+      alert('Pedido Yooga simulado recebido: ' + id);
+
+      // Código para fetch real:
+      // const res = await fetch('/api/yooga/pedidos');
+      // if (!res.ok) throw new Error('Falha ao buscar pedidos');
+      // const data = await res.json();
+      // ... mapear e setPedidos ...
+    } catch (err) {
+      console.error(err);
+      alert('Erro ao conectar com Yooga - verifique API Key e backend');
+    }
+  }
+
+  /* ======= UTILIDADES DE IMPORTAÇÃO/EXPORTAÇÃO (CSV simples) ======= */
+  function exportStockCSV() {
+    const header = 'sku,name,unit,qty,cost,minStock,supplier\n';
+    const rows = stock.map(i => `${i.sku},"${i.name}",${i.unit},${i.qty},${i.cost},${i.minStock},${i.supplierId}\n`).join('');
+    const csv = header + rows;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `estoque-${new Date().toISOString()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /* ======= UI ======= */
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <header className="bg-gradient-to-r from-red-600 to-orange-600 text-white p-6 shadow">
+        <div className="max-w-6xl mx-auto flex justify-between">
+          <div>
+            <h1 className="text-3xl font-bold">🍣 Hot Sushi Lounge — Painel Operacional</h1>
+            <div className="text-sm opacity-90">Gerente: Hiago • Controle total de operação e estoque</div>
+          </div>
+          <div className="text-right">
+            <div className="font-bold">Valor em estoque: R$ {stockValue.toFixed(2)}</div>
+            <div className="text-xs opacity-90">Itens críticos: {lowStock.length}</div>
+          </div>
+        </div>
+      </header>
+
+      <nav className="bg-white shadow mt-4">
+        <div className="max-w-6xl mx-auto flex overflow-x-auto">
+          {[ { id: 'dashboard', label: 'Dashboard', icon: <BarChart3 /> }, { id: 'estoque', label: 'Estoque', icon: <Package /> }, { id: 'pedidos', label: 'Pedidos', icon: <ShoppingBag /> }, { id: 'equipe', label: 'Equipe', icon: <Users /> }, { id: 'fornecedores', label: 'Fornecedores', icon: <FilePlus /> }, { id: 'config', label: 'Configurações', icon: <Settings /> }, { id: 'relatorios', label: 'Relatórios', icon: <FileText /> } ].map(tab => (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-6 py-4 font-semibold border-b-4 ${activeTab===tab.id? 'border-red-600 text-red-600':'border-transparent text-gray-600'}`}>
+              <div className="flex items-center gap-2">{tab.icon}{tab.label}</div>
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      <main className="max-w-6xl mx-auto p-6 space-y-6">
+        {/* DASHBOARD */}
+        {activeTab === 'dashboard' && (
+          <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-white p-4 rounded shadow">
+              <div className="text-sm text-gray-500">Pedidos Ativos</div>
+              <div className="text-2xl font-bold">{pedidos.filter(p => p.status !== 'Pronto').length}</div>
+              <div className="text-xs text-gray-400">Integração: {settings.integracaoYooga ? 'Yooga' : 'Simulação'}</div>
+            </div>
+
+            <div className="bg-white p-4 rounded shadow">
+              <div className="text-sm text-gray-500">Itens com estoque crítico</div>
+              <div className="text-2xl font-bold">{lowStock.length}</div>
+              <div className="text-xs text-gray-400">Use "Criar PO" para gerar pedidos de compra</div>
+            </div>
+
+            <div className="bg-white p-4 rounded shadow">
+              <div className="text-sm text-gray-500">Valor do Estoque</div>
+              <div className="text-2xl font-bold">R$ {stockValue.toFixed(2)}</div>
+              <div className="text-xs text-gray-400">Custo estimado de reposição</div>
+            </div>
+
+            <div className="bg-white p-4 rounded shadow">
+              <div className="flex justify-between items-center">
+                <div>
+                  <div className="text-sm text-gray-500">Ações Rápidas</div>
+                  <button className="mt-2 bg-green-600 text-white px-3 py-2 rounded flex items-center gap-1 text-sm" onClick={() => { const orders = createPurchaseOrdersForLowStock(); if (orders.length) alert(`${orders.length} PO(s) criadas`); else alert('Nenhum item crítico encontrado'); }}><Zap size={14} /> Criar PO</button>
+                </div>
+                <div>
+                  <button className="bg-blue-600 text-white px-3 py-2 rounded mr-2 text-sm" onClick={fetchPedidosFromYooga}>Sincronizar Yooga</button>
+                  <button className="bg-gray-100 px-3 py-2 rounded text-sm" onClick={exportStockCSV}>Exportar Estoque</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ESTOQUE */}
+        {activeTab === 'estoque' && (
+          <section className="bg-white p-6 rounded shadow space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-bold">Controle de Estoque</h2>
+              <div className="flex gap-2">
+                <button className="bg-green-600 text-white px-3 py-2 rounded flex items-center gap-1" onClick={() => addStockItem({ sku: `NEW-${Date.now()}`, name: 'Novo Ingrediente', unit: 'un', qty: 0, cost: 0, minStock: 1, supplierId: suppliers[0]?.id })}><Plus size={14} /> Novo Item</button>
+                <button className="bg-gray-100 px-3 py-2 rounded" onClick={exportStockCSV}>Exportar CSV</button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full table-auto text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="p-2 text-left">SKU</th>
+                    <th className="p-2 text-left">Nome</th>
+                    <th className="p-2">Un</th>
+                    <th className="p-2">Qtd</th>
+                    <th className="p-2">Custo</th>
+                    <th className="p-2">Mín</th>
+                    <th className="p-2">Fornecedor</th>
+                    <th className="p-2">Ações</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stock.map(item => (
+                    <tr key={item.sku} className={`${item.qty <= item.minStock ? 'bg-red-50' : ''} border-b`}>
+                      <td className="p-2 font-semibold">{item.sku}</td>
+                      <td className="p-2">{item.name}</td>
+                      <td className="p-2 text-center">{item.unit}</td>
+                      <td className="p-2 text-center">{item.qty}</td>
+                      <td className="p-2 text-right">R$ {Number(item.cost).toFixed(2)}</td>
+                      <td className="p-2 text-center">{item.minStock}</td>
+                      <td className="p-2">{suppliers.find(s => s.id === item.supplierId)?.name || '—'}</td>
+                      <td className="p-2 text-right">
+                        <button className="text-xs px-2 py-1 bg-gray-100 rounded" onClick={() => adjustStock(item.sku, Number(prompt('Nova quantidade para ' + item.sku, String(item.qty))) || item.qty, 'Contagem rápida')}>Ajustar</button>
+                        <button className="text-xs px-2 py-1 ml-2 bg-red-100 rounded" onClick={() => { if (confirm('Remover item do estoque?')) removeStockItem(item.sku); }}><Trash2 size={14} /></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="pt-4">
+              <h3 className="font-semibold">Movimentações recentes</h3>
+              <ul className="text-sm mt-2 space-y-1">
+                {movements.slice(0,10).map((m,i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="text-gray-500 w-1/4">{new Date(m.date).toLocaleTimeString('pt-BR')}</span>
+                    <span className={`font-semibold ${m.qty > 0 ? 'text-green-600' : 'text-red-600'}`}>{m.type.toUpperCase()}</span> 
+                    <span className="w-1/4">{m.sku}</span>
+                    <span className="w-1/6 text-right">{m.qty}</span>
+                    <span className="text-gray-600">{m.note}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </section>
+        )}
+
+        {/* PEDIDOS */}
+        {activeTab === 'pedidos' && (
+          <section className="bg-white p-6 rounded shadow space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-bold">Pedidos Ativos</h2>
+              <div>
+                <button className="bg-blue-600 text-white px-3 py-2 rounded mr-2 text-sm" onClick={fetchPedidosFromYooga}>Buscar Yooga (Sim.)</button>
+                <button className="bg-green-600 text-white px-3 py-2 rounded text-sm" onClick={() => { const id = `#SIM-${Math.floor(Math.random()*9999)}`; const newP = { id, channel: 'Simulado', cliente: 'Teste', items: [{ sku: 'SUS-02', qty: 1 }], status: 'Novo', responsavel: 'Cozinha', tempo: 0, valor: 66 }; setPedidos(prev => [newP, ...prev]); alert('Pedido simulado criado: ' + id); }}>Simular Pedido</button>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              {pedidos.filter(p => p.status !== 'Pronto').map(p => (
+                <div key={p.id} className="border rounded p-4 flex justify-between items-center bg-gray-50 hover:shadow-md">
+                  <div>
+                    <div className="font-bold">{p.id} • {p.cliente} <span className="text-xs text-gray-500">({p.channel})</span></div>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {p.items?.map(it => {
+                        const recipe = recipes.find(r => r.sku === it.sku);
+                        const cost = recipe ? recipe.ingredients.reduce((sum, ing) => {
+                          const stockItem = stock.find(s => s.sku === ing.sku);
+                          return sum + (stockItem ? stockItem.cost * ing.qty : 0);
+                        }, 0) : 0;
+                        return `${it.sku} x${it.qty} (Custo: R$${(cost * it.qty).toFixed(2)})`;
+                      }).join(' | ')}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className={`font-bold ${p.tempo > settings.tempoMaximo ? 'text-red-600' : 'text-gray-700'}`}>{p.tempo} min</div>
+                    <button className="px-3 py-2 bg-red-600 text-white rounded text-sm" onClick={() => { finalizarPedido(p.id); alert(`Pedido ${p.id} finalizado e estoque consumido!`); }}>Finalizar</button>
+                    <button className="px-3 py-2 bg-gray-200 rounded text-sm" onClick={() => setPedidos(prev => prev.filter(x => x.id !== p.id))}><Trash2 size={16} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            <div className="pt-4 border-t">
+               <h3 className="font-semibold">Histórico de Pedidos Finalizados (Últimos 5)</h3>
+               <ul className="text-sm mt-2 space-y-1">
+                 {pedidos.filter(p => p.status === 'Pronto').slice(0, 5).map(p => (
+                   <li key={p.id} className="text-gray-600">{p.id} | {p.cliente} | R$ {p.valor.toFixed(2)}</li>
+                 ))}
+               </ul>
+            </div>
+          </section>
+        )}
+
+        {/* EQUIPE */}
+        {activeTab === 'equipe' && (
+          <section className="bg-white p-6 rounded shadow space-y-4">
+            <h2 className="text-xl font-bold">Gestão de Equipe</h2>
+            <div className="space-y-3">
+              {team.map(m => (
+                <div key={m.id} className="flex justify-between items-center border p-3 rounded">
+                  <div>
+                    <div className="font-bold">{m.name}</div>
+                    <div className="text-sm text-gray-600">{m.role} • {m.shift}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="text-sm font-semibold text-green-600">{m.performance}% Desempenho</div>
+                    <Star size={16} className="text-yellow-500"/>
+                  </div>
+                </div>
+              ))}
+            </div>
+             <button className="mt-4 bg-gray-100 text-gray-700 px-3 py-2 rounded text-sm" onClick={() => setTeam(prev => [...prev, { id: Date.now(), name: 'Novo Membro', role: 'Ajustar', shift: 'Ajustar', performance: 0 }])}><Plus size={14}/> Adicionar Membro</button>
+          </section>
+        )}
+
+        {/* FORNECEDORES */}
+        {activeTab === 'fornecedores' && (
+          <section className="bg-white p-6 rounded shadow space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-xl font-bold">Fornecedores</h2>
+              <button className="bg-green-600 text-white px-3 py-2 rounded flex items-center gap-1 text-sm" onClick={() => setSuppliers(prev => [...prev, { id: `F${Date.now()}`, name: 'Novo Fornecedor', contact: '', leadDays: 3 }])}><Plus size={14}/> Novo</button>
+            </div>
+            
+            <div className="space-y-3">
+              {suppliers.map(s => (
+                <div key={s.id} className="flex justify-between items-center border p-3 rounded bg-gray-50">
+                  <div>
+                    <div className="font-bold">{s.name}</div>
+                    <div className="text-sm text-gray-600">{s.contact} • Prazo: {s.leadDays} dias</div>
+                  </div>
+                  <div>
+                    <button className="px-2 py-1 bg-gray-100 rounded text-xs" onClick={() => setSuppliers(prev => prev.map(x => x.id === s.id ? { ...x, name: prompt('Nome do fornecedor', s.name) || s.name } : x))}>Editar</button>
+                     <button className="px-2 py-1 ml-2 bg-red-100 rounded text-xs" onClick={() => { if (confirm('Remover fornecedor?')) setSuppliers(prev => prev.filter(x => x.id !== s.id)); }}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            <div className="pt-4 border-t">
+                <h3 className="font-semibold mb-2">Pedidos de Compra (PO) em Aberto</h3>
+                <ul className="text-sm space-y-1">
+                    {purchaseOrders.filter(p => p.status === 'open').map(po => (
+                        <li key={po.id} className="flex justify-between p-2 border-b bg-yellow-50 rounded">
+                            <span>**{po.id}** • {po.sku} x{po.qty} ({po.supplierName})</span>
+                            <button className="bg-red-600 text-white px-2 py-1 rounded text-xs" onClick={() => receivePurchaseOrder(po.id)}>Receber</button>
+                        </li>
+                    ))}
+                    {purchaseOrders.filter(p => p.status === 'open').length === 0 && <li className="text-gray-500">Nenhum PO em aberto.</li>}
+                </ul>
+            </div>
+          </section>
+        )}
+
+        {/* CONFIGURAÇÕES E INTEGRAÇÃO YOOGA */}
+        {activeTab === 'config' && (
+          <section className="bg-white p-6 rounded shadow space-y-4">
+            <h2 className="text-xl font-bold">Configurações e Integração</h2>
+            
+            <div className="p-3 border rounded">
+              <h3 className="font-semibold mb-2">Operacional</h3>
+              <label className="block font-medium">Tempo máximo de preparo (min)</label>
+              <input type="number" value={settings.tempoMaximo} onChange={e => setSettings({ ...settings, tempoMaximo: Number(e.target.value) })} className="border p-2 rounded w-32" />
+            </div>
+
+            <div className="p-3 border rounded">
+              <h3 className="font-semibold mb-2">Estoque e Reposição</h3>
+              <label className="flex items-center gap-2 mb-2"><input type="checkbox" checked={settings.autoReorder} onChange={e => setSettings({ ...settings, autoReorder: e.target.checked })} /> Reposição automática (criar PO para itens críticos)</label>
+              <label className="block mt-2 font-medium">Multiplicador de reposição (x)</label>
+              <input type="number" value={settings.reorderMultiplier} step={0.1} onChange={e => setSettings({ ...settings, reorderMultiplier: Number(e.target.value) })} className="border p-2 rounded w-32" />
+            </div>
+
+            <div className="p-3 border rounded bg-blue-50">
+              <h3 className="font-semibold mb-2">Integração Yooga</h3>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={settings.integracaoYooga} onChange={e => setSettings({ ...settings, integracaoYooga: e.target.checked })} /> Ativar integração Yooga (Atenção: Requer Backend)</label>
+              {settings.integracaoYooga && (
+                <div className="mt-2 space-y-2">
+                  <label className="block font-medium">Yooga API Key (Apenas demonstração, salve no backend)</label>
+                  <input type="text" value={settings.yoogaApiKey} onChange={e => setSettings({ ...settings, yoogaApiKey: e.target.value })} className="border p-2 rounded w-full" placeholder="Chave de API (Não use no Front-end em produção)" />
+                  <p className="text-sm text-gray-600">Recomendação: Use um backend para receber Webhooks do Yooga e atualizar este painel em tempo real.</p>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* RELATÓRIOS */}
+        {activeTab === 'relatorios' && (
+          <section className="bg-white p-6 rounded shadow space-y-4">
+            <h2 className="text-xl font-bold">Relatórios e Análises</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="p-4 bg-white rounded shadow border">
+                <div className="text-sm text-gray-500">Custo Total do Estoque</div>
+                <div className="text-2xl font-bold text-red-700">R$ {stockValue.toFixed(2)}</div>
+              </div>
+              <div className="p-4 bg-white rounded shadow border">
+                <div className="text-sm text-gray-500">Itens Críticos</div>
+                <div className="text-2xl font-bold text-yellow-600">{lowStock.length}</div>
+              </div>
+              <div className="p-4 bg-white rounded shadow border">
+                <div className="text-sm text-gray-500">POs Abertos</div>
+                <div className="text-2xl font-bold text-blue-600">{purchaseOrders.filter(p => p.status === 'open').length}</div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-semibold mt-4">Exportar Dados Operacionais</h3>
+              <div className="mt-2 flex gap-2">
+                <button className="bg-blue-600 text-white px-3 py-2 rounded text-sm">Exportar Vendas (CSV)</button>
+                <button className="bg-gray-100 px-3 py-2 rounded text-sm">Exportar Movimentações (CSV)</button>
+              </div>
+            </div>
+          </section>
+        )}
+      </main>
+
+      <footer className="text-center text-xs text-gray-500 p-4">Painel demo (Front-end apenas) • É necessário backend para persistência e integrações.</footer>
+    </div>
+  );
+}
